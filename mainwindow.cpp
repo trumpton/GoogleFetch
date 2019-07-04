@@ -116,9 +116,16 @@ QString MainWindow::xmlBeautifier(QString src)
 void MainWindow::on_action_About_triggered()
 {
     QString text =
+<<<<<<< HEAD
     QString("\GoogleFetch Version: %1.\n").arg(appHash()) +
     QString("Library Version: %1.\n").arg(libVersion()) +
     QString("It was built on: %1.\n").arg(buildDate()) ;
+=======
+    QString("GoogleFetch Release %1.\n").arg(BUILDVERSION) +
+    QString("It was built on: %1.\n\n").arg(buildDate()) +
+    QString("GoogleFetch Repository Version: %1.\n").arg(appHash()) +
+    QString("Library Repository Version: %1.\n").arg(libVersion()) ;
+>>>>>>> 1454f14a25a63a31206cb58c8680d2c569fc9321
 
     warningOkDialog(this, QString("About GoogleFetch"), text)  ;
 }
