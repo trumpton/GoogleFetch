@@ -2,7 +2,6 @@
 #include "ui_mainwindow.h"
 #include <QJsonDocument>
 #include <QDomDocument>
-#include "version.h"
 #include "../Lib/supportfunctions.h"
 
 MainWindow::MainWindow(QWidget *parent) :
@@ -117,10 +116,9 @@ QString MainWindow::xmlBeautifier(QString src)
 void MainWindow::on_action_About_triggered()
 {
     QString text =
-    QString("GoogleFetch Release %1.\n").arg(BUILDVERSION) +
-    QString("It was built on: %1.\n").arg(buildDate()) +
-    QString("\GoogleFetch Repository Version: %1.\n").arg(appHash()) +
-    QString("Library Repository Version: %1.\n").arg(libVersion()) ;
+    QString("\GoogleFetch Version: %1.\n").arg(appHash()) +
+    QString("Library Version: %1.\n").arg(libVersion()) +
+    QString("It was built on: %1.\n").arg(buildDate()) ;
 
     warningOkDialog(this, QString("About GoogleFetch"), text)  ;
 }
