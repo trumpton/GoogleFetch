@@ -139,7 +139,7 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
             }
 
             request.setHeader(QNetworkRequest::ContentLengthHeader, submitdata.length());
-            header = header + "Content-Length: " + submitdata.length() + "\n" ;
+            header = header + "Content-Length: " + QString::number(submitdata.length()) + "\n" ;
 
             request.setRawHeader("charset", "UTF-8") ;
             header = header + "charset: UTF-8\n" ;
@@ -204,7 +204,7 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
                 break ;
             default:
                 connectionerror = false ;
-                if (replycode>=200 && replycode<=299) {
+                if (errorcode>=200 && errorcode<=299) {
                   errorstatus = "" ;
                   googlePutPostResponse = reply->readAll() ;
                   readsuccess=true ; ;
@@ -309,7 +309,7 @@ QString GoogleConnection::googleGet(QString link, QString logfile)
             default:
                 connectionerror=false ;
                 // if page load is OK, get details, else set error string
-                if (replycode>=200 && replycode<=299) {
+                if (errorcode>=200 && errorcode<=299) {
                   googleGetResponse = reply->readAll() ;
                   errorstatus="" ;
                   readsuccess=true ;
@@ -562,7 +562,8 @@ void GoogleConnection::getAccessToken()
         break ;
     default:
         QVariant replycode=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ;
-        if (replycode>=200 && replycode<=299) {
+        errorcode = replycode.toInt() ;
+        if (errorcode>=200 && errorcode<=299) {
             QString resultstring = reply->readAll() ;
             accesstoken = ExtractParameter(resultstring, "access_token") ;
             if (accesstoken.isEmpty()) {
@@ -586,7 +587,8 @@ void GoogleConnection::getAccessToken()
 
 QString GoogleConnection::ExtractParameter(QString Response, QString Parameter, int Occurrence)
 {
-    QRegExp rx ;
+    QRegularExpression rx ;
+    QRegularExpressionMatch rem ;
     QStringList records;
     QString record ;
     QString pattern ;
@@ -604,10 +606,16 @@ QString GoogleConnection::ExtractParameter(QString Response, QString Parameter, 
 
     // Find "parameter" : "xxxx",
     // Or "parameter" : "xxxx"}
-    pattern = "\"" + Parameter + "\" *: *\"(.*)\"" ;
-    rx.setPattern(pattern) ;
-    rx.setMinimal(true) ;
-    if (rx.indexIn(record)>=0) extracttokenresult = rx.cap(1) ;
+    pattern = "\"" + Parameter + "\" *?: *?\"(.*?)\"" ;
+    rx.setPattern(pattern) ;   
+    rem = rx.match(record) ;
+
+    // From RegExp: if (rx.indexIn(record)>=0) extracttokenresult = rx.cap(1) ;
+
+    if (rem.hasMatch()) {
+        extracttokenresult = rem.captured(0) ;
+    }
+
     return extracttokenresult ;
 }
 
