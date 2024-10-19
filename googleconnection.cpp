@@ -1,6 +1,6 @@
 
 #include "googleconnection.h"
-#include "google-account.h"
+#include "account-googleaccess.h"
 
 #include "../Lib/supportfunctions.h"
 

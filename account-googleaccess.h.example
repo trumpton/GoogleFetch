@@ -4,8 +4,8 @@
 // To set up a Client ID and Secret, Visit:
 //     https://console.developers.google.com/apis/dashboard
 
-#define CLIENTID "124431808962-jj2udt9sgtrch9eo77iegmeq61edj296.apps.googleusercontent.com"
-#define SECRET "_F4iFZG72iiKolwpqxNHdP8b"
+#define CLIENTID "enter-your-client-id"
+#define SECRET "enter-your-client-secret"
 
 // People API   - https://www.googleapis.com/auth/contacts
 // Calendar API - https://www.googleapis.com/auth/calendar
