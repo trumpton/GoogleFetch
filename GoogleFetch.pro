@@ -59,6 +59,8 @@ SOURCES += \
         main.cpp \
         mainwindow.cpp \
     googleconnection.cpp \
+    googleconfig.cpp \
+    ../Lib/iniconfig.cpp \
     ../Lib/supportfunctions.cpp \
     ../Lib/warningok.cpp \
     ../Lib/warningyesno.cpp \
@@ -69,8 +71,9 @@ SOURCES += \
 
 HEADERS += \
         mainwindow.h \
-    account-googleaccess.h \
     googleconnection.h \
+    googleconfig.h \
+    ../Lib/iniconfig.h \
     ../Lib/supportfunctions.h \
     ../Lib/warningok.h \
     ../Lib/warningyesno.h \

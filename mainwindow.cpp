@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 #include <QDomDocument>
 #include "../Lib/supportfunctions.h"
+#include "googleconfig.h"
 
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
@@ -10,6 +11,18 @@ MainWindow::MainWindow(QWidget *parent) :
 {
     ini = new QSettings("trumpton.uk", "GoogleFetcher");
     ui->setupUi(this);
+
+    // The Google client ID and secret come from the [google] section of googlefetch.ini, or ContactManager.ini
+    QString clientid, clientsecret ;
+    QString inifile = googleFetchIniFile() ;
+    if (loadGoogleClient(inifile, clientid, clientsecret)) {
+        gc.setClient(clientid, clientsecret) ;
+    } else if (inifile.isEmpty()) {
+        ui->plainTextOutput->setPlainText("No ini file found.  Create googlefetch.ini (or ContactManager.ini) with a [google] section that sets clientid= and secret=.") ;
+    } else {
+        ui->plainTextOutput->setPlainText("The [google] section of " + inifile + " must set clientid= and secret=.") ;
+    }
+
     refreshtoken = ini->value("refreshtoken").toString() ;
     username = ini->value("username").toString() ;
 

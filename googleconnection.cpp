@@ -1,6 +1,5 @@
 
 #include "googleconnection.h"
-#include "account-googleaccess.h"
 
 #include "../Lib/supportfunctions.h"
 
@@ -11,6 +10,9 @@
 #include <QEventLoop>
 #include <QMessageBox>
 #include <QUrlQuery>
+
+// The scopes asked for, the same as ContactManager asks for them (googleaccess_oauth2.cpp)
+static const char *GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/contacts https://www.google.com/m8/feeds/ profile email" ;
 
 
 //*****************************************************************************************************
@@ -60,6 +62,18 @@ GoogleConnection::GoogleConnection(const QString& rt)
     username="" ;
     refreshtokenandusername = "" ;
     setupRToken(rt);
+}
+
+
+//=====================================================================================================
+// Public: setClient
+//
+// Sets the Google OAuth client ID and secret.  They come from the ini file, and are sent with every request.
+//
+void GoogleConnection::setClient(const QString &id, const QString &secret)
+{
+    clientid = id ;
+    clientsecret = secret ;
 }
 
 
@@ -423,8 +437,8 @@ QString GoogleConnection::Authorise(QString logfile)
       QUrlQuery params ;
       QUrl url("https://accounts.google.com/o/oauth2/device/code") ;
       QNetworkRequest request(url) ;
-      params.addQueryItem("client_id", CLIENTID);
-      params.addQueryItem("scope", SCOPE);
+      params.addQueryItem("client_id", clientid);
+      params.addQueryItem("scope", GOOGLE_SCOPE);
       request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
       QObject::connect(&manager, SIGNAL(finished(QNetworkReply *)), &eventLoop, SLOT(quit()));
       reply = manager.post(request, params.query(QUrl::FullyEncoded).toUtf8());
@@ -474,8 +488,8 @@ QString GoogleConnection::Authorise(QString logfile)
       QUrlQuery params ;
       QUrl url("https://www.googleapis.com/oauth2/v4/token") ;
       QNetworkRequest request(url) ;
-      params.addQueryItem("client_id", CLIENTID);
-      params.addQueryItem("client_secret", SECRET);
+      params.addQueryItem("client_id", clientid);
+      params.addQueryItem("client_secret", clientsecret);
       params.addQueryItem("code", device_code);
       params.addQueryItem("grant_type", "http://oauth.net/grant_type/device/1.0");
       request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
@@ -538,8 +552,8 @@ void GoogleConnection::getAccessToken()
 
     QUrl url("https://accounts.google.com/o/oauth2/token") ;
     QNetworkRequest request(url) ;
-    params.addQueryItem("client_id", CLIENTID);
-    params.addQueryItem("client_secret", SECRET);
+    params.addQueryItem("client_id", clientid);
+    params.addQueryItem("client_secret", clientsecret);
     params.addQueryItem("refresh_token", refreshtoken);
     params.addQueryItem("grant_type", "refresh_token");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");

@@ -35,6 +35,9 @@ private:
     void getAccessToken() ;
     QString accesstoken  ;
 
+    // The Google OAuth client ID and secret, from the ini file (see googleconfig.h)
+    QString clientid, clientsecret ;
+
     // Get / Post Response Data
     QString googleGetResponse ;
     QString googlePutPostResponse ;
@@ -49,6 +52,9 @@ private:
     GoogleConnection();
     GoogleConnection(const QString &rt) ;
     void setupRToken(const QString& rt) ;
+
+    // Sets the Google OAuth client ID and secret, which the requests use
+    void setClient(const QString &id, const QString &secret) ;
 
     // Pop up authorisation dialog, and return a refresh_token
     // which must be saved for future use.
