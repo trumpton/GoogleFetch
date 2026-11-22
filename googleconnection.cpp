@@ -2,49 +2,88 @@
 #include "googleconnection.h"
 
 #include "../Lib/supportfunctions.h"
+#include "../Lib/amessagebox.h"
+#include "../Lib/dialogfocus.h"
 
-#include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QUrl>
 #include <QNetworkRequest>
 #include <QEventLoop>
-#include <QMessageBox>
 #include <QUrlQuery>
+#include <QSslSocket>
+#include <QThread>
+#include <QRandomGenerator>
+#include <QRegularExpression>
+#include <QVariant>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 // The scopes asked for, the same as ContactManager asks for them (googleaccess_oauth2.cpp)
 static const char *GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/contacts https://www.google.com/m8/feeds/ profile email" ;
 
 
-//*****************************************************************************************************
+//=====================================================================================================
+//
+// Helper functions for the responses (copied from ContactManager's googleaccess_network.cpp)
+//
 
-// TODO: IfMatch ETag
-//       see: https://developers.google.com/google-apps/contacts/v3/#updating_contacts
-//
-// TODO: retry in case accesstoken had expired
-//
-// TODO: merge post and get into same finction
-//       googleQuery(QString link, QString xml, bool post)
-//       if xml is empty, it is a get (and the content type xml is not set)
-//       if post is true, it's a post
-//       otherwise it's a put
-//
-// TODO: applies to all network connections - if the computer does not have an active network
-//       interface, the app segfaults
+// Google's reason for a failed request, and its message, from the error body it sends
+static void googleReason(const QByteArray &body, QString &reason, QString &message)
+{
+    reason.clear() ;
+    message.clear() ;
+    QJsonObject error = QJsonDocument::fromJson(body).object().value("error").toObject() ;
+    QJsonArray errors = error.value("errors").toArray() ;
+    if (!errors.isEmpty()) {
+        reason = errors.at(0).toObject().value("reason").toString() ;
+        message = errors.at(0).toObject().value("message").toString() ;
+    }
+    if (message.isEmpty()) message = error.value("message").toString() ;
+}
+
+// Only these are retried: Google says the limit will clear.  Authentication, permission, not-found and mismatch
+// errors are not.
+static bool isRateLimit(int status, const QString &reason)
+{
+    return status==429 || (status==403 && (reason=="rateLimitExceeded" || reason=="userRateLimitExceeded")) ;
+}
+
+// Google's server errors (5xx) are retried in the same way as a rate limit: they usually clear
+static bool isServerError(int status)
+{
+    return status>=500 && status<=599 ;
+}
+
+// Errors that are retried: a rate limit, or a server error
+static bool isRetryable(int status, const QString &reason)
+{
+    return isRateLimit(status, reason) || isServerError(status) ;
+}
+
+// The wait before retry number attempt (1 to 4): 500 ms, then 1 s, 2 s and 4 s, with a random fraction added, up to 4 s
+static int rateLimitWait(int attempt)
+{
+    int base = 500 << (attempt-1) ;
+    int wait = base + QRandomGenerator::global()->bounded(base/2 + 1) ;
+    return qMin(wait, 4000) ;
+}
+
+// The status and reason, as the report gives them
+static QString failureText(int status, const QString &reason, const QString &message)
+{
+    QString text = QString("Google answered HTTP %1").arg(status) ;
+    if (!reason.isEmpty()) text += QString(" %1").arg(reason) ;
+    if (!message.isEmpty()) text += QString(": %1").arg(message) ;
+    return text ;
+}
 
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //
-//  Constructor
+//  Constructors
 //
 
-//
-//=====================================================================================================
-// Public: GoogleAccess - Constructor
-//
-//  Initialises, and saves the refresh token to the internal data structures
-//  if it has been provided.  If it is not provided, no function will work, and
-//  a refresh token must be acquired by calling the Authorise function.
-//
 GoogleConnection::GoogleConnection()
 {
     refreshtoken="" ;
@@ -52,6 +91,9 @@ GoogleConnection::GoogleConnection()
     accesstoken="" ;
     username="" ;
     refreshtokenandusername = "" ;
+    logsequencenumber = 1 ;
+    connectionerror = false ;
+    errorcode = 0 ;
 }
 
 GoogleConnection::GoogleConnection(const QString& rt)
@@ -61,11 +103,15 @@ GoogleConnection::GoogleConnection(const QString& rt)
     accesstoken="" ;
     username="" ;
     refreshtokenandusername = "" ;
+    logsequencenumber = 1 ;
+    connectionerror = false ;
+    errorcode = 0 ;
     setupRToken(rt);
 }
 
 
 //=====================================================================================================
+//
 // Public: setClient
 //
 // Sets the Google OAuth client ID and secret.  They come from the ini file, and are sent with every request.
@@ -104,22 +150,30 @@ bool GoogleConnection::isConnectionError()
 }
 
 
-
 //=====================================================================================================
 //
 // Public: googlePutPostDelete
 //
-// Perform a Put/Post or Delete Operation, and return the corresponding message
+// Perform a Put/Post/Patch or Delete Operation, and return the corresponding message
 //
 QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnection::Action action, QString data, bool isjson, bool includeheaderinresponse, QString logfile)
 {
     googlePutPostResponse="" ;
     errorcode=0 ;
     errorstatus="" ;
+    errorrecovery="" ;
 
+    // The pacing set after Google's rate limits, before each upload
+    int pacingdelay = pacer.delayBeforeNext() ;
+    if (pacingdelay>0) QThread::msleep(pacingdelay) ;
+
+    bool hadratelimit=false ;
+    int ratelimitretries=0 ;
+    int ratelimitwait=0 ;
     int retries=1 ;
-    int complete=false ;
-    int readsuccess=false ;
+    bool complete=false ;
+    bool readsuccess=false ;
+    bool timeoutretry=false ;
     QString header ;
     QString QueryChar="?" ;
     if (link.contains("?")) QueryChar="&" ;
@@ -127,6 +181,8 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
     if (!logfile.isEmpty()) writeToFile(logfile, "") ;
 
     do {
+        timeoutretry=false ;
+
         if (accesstoken.isEmpty()) {
 
             readsuccess=false ;
@@ -134,15 +190,14 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
 
         } else {
 
-            QNetworkAccessManager manager ;
-            QNetworkReply *reply ;
+            QNetworkReply *reply = NULL ;
             QUrl url(link + QueryChar + "access_token=" + accesstoken) ;
             QNetworkRequest request(url) ;
             QEventLoop eventLoop ;
 
             // get the page
-            QObject::connect(&manager, SIGNAL(finished(QNetworkReply *)), &eventLoop, SLOT(quit()));
-            QByteArray submitdata = data.toStdString().c_str() ;
+            QObject::connect(&netmanager, SIGNAL(finished(QNetworkReply *)), &eventLoop, SLOT(quit()));
+            QByteArray submitdata = data.toUtf8() ;
 
             if (isjson) {
                 request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -162,28 +217,23 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
             request.setRawHeader("Authorization", auth.toLatin1()) ;
             header = header + "Authorization: Bearer " + accesstoken + "\n" ;
 
-            request.setRawHeader("GData-Version", "3.0") ;
-            header = header + "GData-Version: 3.0" ;
-
+            // Any version of the item may be changed (the ETag is not used here)
             request.setRawHeader("If-Match", "*") ;
             header = header + "If-Match: *\n" ;
 
             QString actionname ;
-
             switch (action) {
             case GoogleConnection::Post:
-                reply = manager.post(request, submitdata) ;
                 actionname="POST" ;
                 break ;
             case GoogleConnection::Put:
-                reply = manager.put(request, submitdata) ;
                 actionname="PUT" ;
                 break ;
             case GoogleConnection::Delete:
-                // From PHP - $req->setRequestHeaders(array('content-type' => 'application/atom+xml; charset=UTF-8; type=feed'));
-                // From stackexchange: "GData-Version": "3.0", "Authorization":"Bearer " + token.accesstoken, "if-match":"*"
-                reply = manager.deleteResource(request) ;
                 actionname="DELETE" ;
+                break ;
+            case GoogleConnection::Patch:
+                actionname="PATCH" ;
                 break ;
             }
 
@@ -194,46 +244,118 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
                             QString("\n\n") + actionname + QString(">>\n") + data +
                             QString("\n\n"), true) ;
 
-            eventLoop.exec() ;
-            QVariant replycode=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ;
-            errorcode=replycode.toInt() ;
+            switch (action) {
+            case GoogleConnection::Post:
+                reply = netmanager.post(request, submitdata) ;
+                break ;
+            case GoogleConnection::Put:
+                reply = netmanager.put(request, submitdata) ;
+                break ;
+            case GoogleConnection::Delete:
+                // From PHP - $req->setRequestHeaders(array('content-type' => 'application/atom+xml; charset=UTF-8; type=feed'));
+                // From stackexchange: "GData-Version": "3.0", "Authorization":"Bearer " + token.accesstoken, "if-match":"*"
+                reply = netmanager.deleteResource(request) ;
+                break ;
+            case GoogleConnection::Patch:
+                reply = netmanager.sendCustomRequest(request, "PATCH", submitdata) ;
+                break ;
+            }
 
-            // if page load is OK, get details, else set error string
+            eventLoop.exec() ;
+            QVariant replycode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ;
+            errorcode = replycode.toInt() ;
+            int status = replycode.toInt() ;
+
+            // The body is read once, for the result and the reason Google gives
+            QByteArray body = reply->readAll() ;
+            QString reason, message ;
+            googleReason(body, reason, message) ;
+
             switch (reply->error()) {
             case QNetworkReply::ConnectionRefusedError:
                 connectionerror = true ;
                 errorstatus="Connection Refused." ;
+                errorrecovery="Could not reach Google. Sync again." ;
                 break ;
             case QNetworkReply::RemoteHostClosedError:
                 connectionerror = true ;
-                errorstatus="Remote Host Closed Connection." ;
+                errorstatus="Connection closed by Google (Remote Host Closed Connection)." ;
+                errorrecovery="Google closed the connection. Sync again." ;
                 break ;
             case QNetworkReply::HostNotFoundError:
                 connectionerror = true ;
                 errorstatus="Host accounts.google.com Not Found." ;
+                errorrecovery="Could not find Google. Check the connection, then sync again." ;
                 break ;
             case QNetworkReply::UnknownServerError:
                 connectionerror = true ;
                 errorstatus="Unknown Server Error." ;
+                errorrecovery="Google reported a server error. Sync again." ;
                 break ;
             default:
+
                 connectionerror = false ;
-                if (errorcode>=200 && errorcode<=299) {
+                if (status>=200 && status<=299) {
                   errorstatus = "" ;
-                  googlePutPostResponse = reply->readAll() ;
-                  readsuccess=true ; ;
-                } else {
-                  errorstatus = "Network Error " + replycode.toString() ;
-                  googlePutPostResponse = errorstatus + " - " + reply->readAll() ;  // TODO: temp
+                  googlePutPostResponse = body ;
+                  readsuccess=true ;
+
+                } else if (status==412) {
+                  // Precondition Failed: Google's copy has changed since the ETag sent.  It is not retried here
+                  errorstatus = "Network Error 412" ;
+                  googlePutPostResponse = body ;
+                  readsuccess=true ;
+
+                } else if (isRetryable(status, reason) && ratelimitretries<4) {
+                  // Google's rate limit: wait, then ask again.  Four retries, then the request is a failure
+                  ratelimitretries++ ;
+                  ratelimitwait = rateLimitWait(ratelimitretries) ;
+                  hadratelimit = isRateLimit(status, reason) ;
+                  timeoutretry = true ;
+
+                } else if (isRetryable(status, reason)) {
+                  googlePutPostResponse = body ;
+                  hadratelimit = isRateLimit(status, reason) ;
+                  errorstatus = failureText(status, reason, message) + " (still failing after 4 retries)" ;
+                  errorrecovery = "Google did not clear the error after four retries. Wait five minutes, then sync again." ;
+                  readsuccess=true ;
+
+                } else if (status==0) {
+                  // No answer from Google at all
+                  errorstatus = "Network Error " + reply->errorString() ;
+                  errorrecovery = "Could not reach Google. Sync again." ;
+                  connectionerror = true ;
                   readsuccess=false ;
+
+                } else if (status==401) {
+                  // Not signed in: the sign-in is refreshed below
+                  errorstatus = failureText(status, reason, message) ;
+                  errorrecovery = "Sign in to Google again, then sync." ;
+                  readsuccess=false ;
+
+                } else {
+                  // Anything else is not retried.  It is reported with Google's reason
+                  googlePutPostResponse = body ;
+                  errorstatus = failureText(status, reason, message) ;
+                  errorrecovery = "Correct the item named above, then sync again." ;
+                  readsuccess=true ;
                 }
+                break ;
             }
+            // The reply has been read, so free it (the manager is shared)
+            if (reply) reply->deleteLater() ;
         }
 
-        // if there is an error refresh the access token and retry once
-        if (readsuccess || retries==0) {
+        if (timeoutretry==true) {
+            // A rate limit: wait, then try again
+            QThread::msleep(ratelimitwait) ;
+            complete=false ;
+
+        } else if (readsuccess || retries==0) {
             complete=true ;
+
         } else {
+            // If there is an error refresh the access token and retry once
             getAccessToken() ;
             retries-- ;
         }
@@ -241,16 +363,22 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
         if (!logfile.isEmpty())
             writeToFile(logfile,
                         QString("RESPONSE>>\n") + googlePutPostResponse +
-                        QString("STATUS: ") + errorstatus +
+                        QString("\n\nSTATUS>>\n") + QString::number(errorcode) + QString(" ") + errorstatus +
                         QString("\n\n--------------------------\n\n"), true) ;
 
     } while (!complete) ;
+
+    // The pacing counts each transaction, and whether it needed a retry
+    pacer.finished(hadratelimit) ;
+    if (!errorstatus.isEmpty()) {
+        lastfailure = errorstatus ;
+        lastrecovery = errorrecovery ;
+    }
 
     if (includeheaderinresponse) {
         return  QString("URL: ") + link + QueryChar + "access_token=" + accesstoken +
                 QString("\n\nHEADER >>\n") + header +
                 QString("\n\n-----------------------------------------\n\n") + googlePutPostResponse ;
-
     }
     return googlePutPostResponse ;
 }
@@ -265,12 +393,18 @@ QString GoogleConnection::googlePutPostDelete(QString link, enum GoogleConnectio
 QString GoogleConnection::googleGet(QString link, QString logfile)
 {
     int retries=1 ;
-    int complete=false ;
-    int readsuccess=false ;
+    bool complete=false ;
+    bool readsuccess=false ;
+    QString logseq = QString("%1").arg(logsequencenumber++,4,10,QChar('0')) ;
 
     errorcode=0 ;
     errorstatus="" ;
+    errorrecovery="" ;
     googleGetResponse="" ;
+
+    // Rate limits are retried as for writes
+    int ratelimitretries=0 ;
+    int ratelimitwait=0 ;
 
     if (!logfile.isEmpty()) writeToFile(logfile, "") ;
 
@@ -284,8 +418,7 @@ QString GoogleConnection::googleGet(QString link, QString logfile)
 
             QString QueryChar="?" ;
             if (link.contains("?")) QueryChar="&" ;
-            QNetworkAccessManager manager ;
-            QNetworkReply *reply ;
+            QNetworkReply *reply = NULL ;
             QUrl url(link + QueryChar + "access_token=" + accesstoken) ;
             QNetworkRequest request(url) ;
             QEventLoop eventLoop ;
@@ -297,11 +430,17 @@ QString GoogleConnection::googleGet(QString link, QString logfile)
                             QString("\n\n"), true) ;
 
             // get the page
-            QObject::connect(&manager, SIGNAL(finished(QNetworkReply *)), &eventLoop, SLOT(quit()));
-            reply = manager.get(request);
+            QObject::connect(&netmanager, SIGNAL(finished(QNetworkReply*)), &eventLoop, SLOT(quit()));
+            reply = netmanager.get(request) ;
             eventLoop.exec() ;
-            QVariant replycode=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ;
-            errorcode=replycode.toInt() ;
+            QVariant replycode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ;
+            errorcode = replycode.toInt() ;
+            int status = replycode.toInt() ;
+
+            // The body gives Google's reason for a failure
+            QByteArray body = reply->readAll() ;
+            QString reason, message ;
+            googleReason(body, reason, message) ;
 
             switch (reply->error()) {
             case QNetworkReply::ConnectionRefusedError:
@@ -322,23 +461,63 @@ QString GoogleConnection::googleGet(QString link, QString logfile)
                 break ;
             default:
                 connectionerror=false ;
-                // if page load is OK, get details, else set error string
-                if (errorcode>=200 && errorcode<=299) {
-                  googleGetResponse = reply->readAll() ;
+                if (status>=200 && status<=299) {
+                  googleGetResponse = body ;
                   errorstatus="" ;
                   readsuccess=true ;
-                } else {
-                  googleGetResponse = "" ;
-                  errorstatus = "Network Error " + replycode.toString() ;
+
+                } else if (isRetryable(status, reason) && ratelimitretries<4) {
+                  // Google's rate limit: wait, then ask again
+                  ratelimitretries++ ;
+                  ratelimitwait = rateLimitWait(ratelimitretries) ;
+                  errorstatus = failureText(status, reason, message) ;
                   readsuccess=false ;
+
+                } else if (isRetryable(status, reason)) {
+                  googleGetResponse = "" ;
+                  errorstatus = failureText(status, reason, message) + " (still failing after 4 retries)" ;
+                  errorrecovery = "Google did not clear the error after four retries. Wait five minutes, then sync again." ;
+                  readsuccess=true ;
+
+                } else if (status==401) {
+                  // Not signed in: the sign-in is refreshed once below
+                  googleGetResponse = "" ;
+                  errorstatus = failureText(status, reason, message) ;
+                  errorrecovery = "Sign in to Google again, then sync." ;
+                  readsuccess=false ;
+
+                } else if (status==0) {
+                  // No answer from Google: tried once more
+                  googleGetResponse = "" ;
+                  errorstatus = "Network Error " + reply->errorString() ;
+                  errorrecovery = "Could not reach Google. Sync again." ;
+                  readsuccess=false ;
+
+                } else {
+                  // Anything else is not retried: it is reported with Google's reason
+                  googleGetResponse = body ;
+                  errorstatus = failureText(status, reason, message) ;
+                  errorrecovery = "Sync again once the cause in the report is put right." ;
+                  readsuccess=true ;
                 }
                 break ;
-
             }
+            // The reply has been read, so free it (the manager is shared)
+            if (reply) reply->deleteLater() ;
         }
 
-        // if there is an error refresh the access token and retry once
-        if (readsuccess || retries==0) {
+        // Add the log file name to the error status
+        if (!errorstatus.isEmpty() && !logfile.isEmpty()) {
+            errorstatus = logseq + QString(": ") + errorstatus ;
+        }
+
+        // A rate limit is waited out before the request is sent again.  Otherwise an error refreshes the access token
+        // and retries once
+        if (ratelimitwait>0) {
+            QThread::msleep(ratelimitwait) ;
+            ratelimitwait=0 ;
+            complete=false ;
+        } else if (readsuccess || retries==0) {
             complete=true ;
         } else {
             getAccessToken() ;
@@ -348,13 +527,15 @@ QString GoogleConnection::googleGet(QString link, QString logfile)
         if (!logfile.isEmpty())
             writeToFile(logfile,
                         QString("RESPONSE>>\n") + googleGetResponse +
-                        QString("STATUS: ") + errorstatus +
+                        QString("\n\nSTATUS>>\n") + QString::number(errorcode) + QString(" ") + errorstatus +
                         QString("\n\n--------------------------\n\n"), true) ;
-
 
     } while (!complete) ;
 
-
+    if (!errorstatus.isEmpty()) {
+        lastfailure = errorstatus ;
+        lastrecovery = errorrecovery ;
+    }
     return googleGetResponse ;
 }
 
@@ -377,21 +558,11 @@ QString GoogleConnection::googleGet(QString link, QString logfile)
 //
 
 
-// OAuth2 / Google - Network Access Helper Functions
-//
-// setupRToken          - Sets the refresh token, previously generated with Authorise
-// Authorise            - allows user to log in and authorise use.  Returns refresh token/email
-// googleGetAccessToken - Retrieve the access token for the session
-//
-//
-
-
 //=====================================================================================================
 //
 // Public - GoogleConnection - setupRToken
 //
-// Constructor, sets the refresh token which has been
-// previously generated with Authorise.
+// Sets the refresh token, and the username, which were generated with Authorise and saved
 //
 void GoogleConnection::setupRToken(const QString& rt)
 {
@@ -422,6 +593,7 @@ QString GoogleConnection::Authorise(QString logfile)
     QString verification_url ;
     QString expires_in ;
     QString interval ;
+    QString errstring ;
 
     refreshtoken="" ;
     accesstoken="" ;
@@ -444,8 +616,8 @@ QString GoogleConnection::Authorise(QString logfile)
       reply = manager.post(request, params.query(QUrl::FullyEncoded).toUtf8());
 
       eventLoop.exec() ;
-      QNetworkReply::NetworkError err = reply->error() ;
-      QString errstring = reply->errorString() ;
+
+      errstring = reply->errorString() ;
       resultstring = reply->readAll() ;
       device_code = ExtractParameter(resultstring, "device_code") ;
       user_code = ExtractParameter(resultstring, "user_code") ;
@@ -455,30 +627,32 @@ QString GoogleConnection::Authorise(QString logfile)
     }
 
     if (user_code.isEmpty()) {
-        addLog("Unable to authorise with Google.  This is caused by either a network error (check your connection); incorrectly configured GoogleConnection-account.h (during compilation); or missing OpenSSL files - ssleay32.dll / libeay32.dll (Windows Clients)") ;
-        errorOkDialog(NULL, "Contact Manager Error", "Unable to connect.  Network error or invalid configuration.  See Log for details.") ;
+        QString errmsg = ExtractParameter(resultstring, "error_description") ;
+        QString detail = errmsg.isEmpty() ? errstring : errmsg ;
+        QString tls = QSslSocket::supportsSsl() ? QString("TLS is available (%1)").arg(QSslSocket::sslLibraryVersionString()) : QString("TLS is not available") ;
+        addLog(QString("GoogleConnection::Authorise: Unable to authorise with Google.  The reply was: ") + detail + ". " + tls + ". Check the network connection, and the clientid and secret in the [google] section of the ini file. On Windows, the OpenSSL DLLs (libssl-3-x64.dll and libcrypto-3-x64.dll for Qt 6) must be beside the program.") ;
+        errorOkDialog(NULL, "GoogleFetch Error", QString( "Unable to connect. : ") + detail) ;
         return refreshtokenandusername ;
     }
 
     // Prompt the user to authenticate, using the code
 
-    // TODO: Check errstring / resultstring and report
-    // particularly if SSL DLLs aren't working
-
-    QMessageBox mb ;
+    AMessageBox mb ;
     mb.setTextFormat(Qt::RichText) ;
     mb.setTextInteractionFlags(Qt::TextBrowserInteraction) ;
-    QString str = QString("<p>1. Connect to <a href=\"") + verification_url + QString("\"><font size=\"+1\">") + verification_url + QString("</font></p>") +
-                  QString("<p>2. Sign-in, and Enter the following code when prompted</p>") +
+    QString str =
+                  QString("<p>1. Copy the following code to the clipboard:</p>") +
                   QString("<p align=\"center\"><font size=\"+2\" color=\"blue\"><b>") + user_code + QString("</b></font></p>") +
-                  QString("<p>3. Select <i>Allow</i> to enable Contact Manager to access your contacts / calendars</p>") +
-                  QString("<p>4. And then press OK <i>below</i> to continue when complete</p>") ;
+                  QString("<p>2. Connect to <a href=\"") + verification_url + QString("\"><font size=\"+1\">") + verification_url + QString("</font></p>") +
+                  QString("<p>3. Paste the code when prompted</p>") +
+                  QString("<p>4. Select a Google account / login</p>") +
+                  QString("<p>5. Select <i>Allow</i> to enable GoogleFetch to access your contacts / calendars</p>") +
+                  QString("<p>6. Acknowledge and authorise the application</p>") +
+                  QString("<p>7. And then press OK <i>below</i> to continue when complete</p>") ;
     mb.setText(str) ;
-    if (!mb.exec()) {
+    if (!execFocused(&mb)) {
         return refreshtokenandusername ;
     }
-
-    // TODO: UP TO HERE IN FLOW
 
     // Get the refresh and access tokens
     {
@@ -503,9 +677,6 @@ QString GoogleConnection::Authorise(QString logfile)
 
     }
 
-    // Above should have been polled ....
-
-
     // Get the username (i.e. the login email address)
     {
         QString result ;
@@ -514,7 +685,7 @@ QString GoogleConnection::Authorise(QString logfile)
     }
 
     if (username.isEmpty()) {
-        addLog("Unable to authorise with Google.  Network error or missing ssleay32.dll and libeay32.dll") ;
+        addLog("GoogleConnection::Authorise: Unable to authorise with Google.  Network error, or the OpenSSL DLLs (libssl-3-x64.dll and libcrypto-3-x64.dll for Qt 6) are missing") ;
     }
 
     if (!logfile.isEmpty())
@@ -529,11 +700,12 @@ QString GoogleConnection::getUsername()
     return username ;
 }
 
+
 //=====================================================================================================
 //
-// Private: GoogleConnection - googleGetAccessToken
+// Private: GoogleConnection - getAccessToken
 //
-//  Updates the access token, based on the authorisation token
+//  Updates the access token, based on the refresh token
 //
 
 void GoogleConnection::getAccessToken()
@@ -547,6 +719,11 @@ void GoogleConnection::getAccessToken()
 
     if (refreshtoken.isEmpty()) {
         errorstatus="Google account not set up in File/Setup (invalid refresh token)" ;
+        return ;
+    }
+
+    if (clientid.isEmpty() || clientsecret.isEmpty()) {
+        errorstatus="The Google client ID and secret are not set: give clientid and secret in the [google] section of googlefetch.ini or ContactManager.ini" ;
         return ;
     }
 
@@ -576,8 +753,7 @@ void GoogleConnection::getAccessToken()
         break ;
     default:
         QVariant replycode=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ;
-        errorcode = replycode.toInt() ;
-        if (errorcode>=200 && errorcode<=299) {
+        if (replycode.toInt()>=200 && replycode.toInt()<=299) {
             QString resultstring = reply->readAll() ;
             accesstoken = ExtractParameter(resultstring, "access_token") ;
             if (accesstoken.isEmpty()) {
@@ -589,8 +765,8 @@ void GoogleConnection::getAccessToken()
         break ;
     }
 
-
 }
+
 
 //=====================================================================================================
 //
@@ -620,16 +796,9 @@ QString GoogleConnection::ExtractParameter(QString Response, QString Parameter, 
 
     // Find "parameter" : "xxxx",
     // Or "parameter" : "xxxx"}
-    pattern = "\"" + Parameter + "\" *?: *?\"(.*?)\"" ;
-    rx.setPattern(pattern) ;   
-    rem = rx.match(record) ;
-
-    // From RegExp: if (rx.indexIn(record)>=0) extracttokenresult = rx.cap(1) ;
-
-    if (rem.hasMatch()) {
-        extracttokenresult = rem.captured(0) ;
-    }
-
+    pattern = "\"" + QRegularExpression::escape(Parameter) + "\" *: *\"(.*?)\"" ;
+    rx.setPattern(pattern) ;
+    rem = rx.match(Response) ;
+    if (rem.hasMatch()) extracttokenresult = rem.captured(1) ;
     return extracttokenresult ;
 }
-

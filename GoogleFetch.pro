@@ -60,6 +60,7 @@ SOURCES += \
         mainwindow.cpp \
     googleconnection.cpp \
     googleconfig.cpp \
+    ratepacer.cpp \
     ../Lib/iniconfig.cpp \
     ../Lib/supportfunctions.cpp \
     ../Lib/warningok.cpp \
@@ -73,6 +74,8 @@ HEADERS += \
         mainwindow.h \
     googleconnection.h \
     googleconfig.h \
+    ratepacer.h \
+    ../Lib/amessagebox.h \
     ../Lib/iniconfig.h \
     ../Lib/supportfunctions.h \
     ../Lib/warningok.h \
