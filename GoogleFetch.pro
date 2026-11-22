@@ -62,7 +62,10 @@ SOURCES += \
     ../Lib/supportfunctions.cpp \
     ../Lib/warningok.cpp \
     ../Lib/warningyesno.cpp \
-    ../Lib/alertsound.cpp
+    ../Lib/alertsound.cpp \
+    ../Lib/alineedit.cpp \
+    ../Lib/atextedit.cpp \
+    ../Lib/dialogfocus.cpp
 
 HEADERS += \
         mainwindow.h \
@@ -71,7 +74,13 @@ HEADERS += \
     ../Lib/supportfunctions.h \
     ../Lib/warningok.h \
     ../Lib/warningyesno.h \
-    ../Lib/alertsound.h 
+    ../Lib/alertsound.h \
+    ../Lib/alineedit.h \
+    ../Lib/atextedit.h \
+    ../Lib/dialogfocus.h
+
+# dialogfocus.cpp calls user32 functions (AttachThreadInput, SetForegroundWindow) on Windows
+win32: LIBS += -luser32
 
 FORMS += \
         mainwindow.ui \
