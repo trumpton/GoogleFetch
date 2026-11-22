@@ -630,7 +630,7 @@ QString GoogleConnection::Authorise(QString logfile)
         QString errmsg = ExtractParameter(resultstring, "error_description") ;
         QString detail = errmsg.isEmpty() ? errstring : errmsg ;
         QString tls = QSslSocket::supportsSsl() ? QString("TLS is available (%1)").arg(QSslSocket::sslLibraryVersionString()) : QString("TLS is not available") ;
-        addLog(QString("GoogleConnection::Authorise: Unable to authorise with Google.  The reply was: ") + detail + ". " + tls + ". Check the network connection, and the clientid and secret in the [google] section of the ini file. On Windows, the OpenSSL DLLs (libssl-3-x64.dll and libcrypto-3-x64.dll for Qt 6) must be beside the program.") ;
+        addLog(QString("GoogleConnection::Authorise: Unable to authorise with Google.  The reply was: ") + detail + ". " + tls + ". Check the network connection, and the clientid and secret in the [google] section of the ini file.") ;
         errorOkDialog(NULL, "GoogleFetch Error", QString( "Unable to connect. : ") + detail) ;
         return refreshtokenandusername ;
     }
@@ -685,7 +685,7 @@ QString GoogleConnection::Authorise(QString logfile)
     }
 
     if (username.isEmpty()) {
-        addLog("GoogleConnection::Authorise: Unable to authorise with Google.  Network error, or the OpenSSL DLLs (libssl-3-x64.dll and libcrypto-3-x64.dll for Qt 6) are missing") ;
+        addLog("GoogleConnection::Authorise: Unable to authorise with Google.  Network error, or TLS is not available") ;
     }
 
     if (!logfile.isEmpty())
